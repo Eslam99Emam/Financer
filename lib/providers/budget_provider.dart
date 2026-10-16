@@ -1,75 +1,131 @@
 import 'dart:async';
 import 'dart:math' as math;
-
-import 'package:financer/helpers.dart';
+import 'package:flutter/foundation.dart';
 import 'package:financer/models/models.dart';
 import 'package:financer/services/storage_service.dart';
-import 'package:flutter/foundation.dart';
 
 class BudgetProvider extends ChangeNotifier {
-  // ── Plan inputs ──
-  double wealth = 0;
+  double wealth = 0; // User-entered starting wealth, before logged income.
   double dailyCost = 0;
   int days = 0;
+
   final List<FixedExpense> fixed = [];
   final List<PersonalActivity> activities = [];
-
-  // ── Actuals ──
   final List<Transaction> _transactions = [];
+  final List<IncomeEntry> _incomeEntries = [];
+  final List<ExpensePreset> presets = [];
+  final List<LoanDebt> obligations = [];
 
   int _counter = 0;
   String newId() => '${_counter++}';
 
-  // ── Persistence ──
   final StorageService? _storage;
   Timer? _saveTimer;
 
   BudgetProvider({StorageService? storage}) : _storage = storage {
     final data = storage?.read();
-    if (data != null && _restore(data)) return;
-    // First launch (or unreadable data): seed defaults.
-    for (final t in ['Dining Out', 'Hanging with Friends', 'Entertainment']) {
-      activities.add(PersonalActivity(id: newId(), title: t));
+    if (data == null || !_restore(data)) _seedDefaults();
+    // A v1 snapshot won't contain presets or income/debt lists.
+    if (presets.isEmpty) _seedPresets();
+    if (_counter == 0) _counter = _maxExistingId + 1;
+  }
+
+  int get _maxExistingId {
+    final ids = <String>[
+      ...fixed.map((e) => e.id),
+      ...activities.map((e) => e.id),
+      ..._transactions.map((e) => e.id),
+      ..._incomeEntries.map((e) => e.id),
+      ...presets.map((e) => e.id),
+      ...obligations.map((e) => e.id),
+    ];
+    return ids
+        .map((e) => int.tryParse(e) ?? -1)
+        .fold<int>(-1, (a, b) => math.max(a, b).toInt());
+  }
+
+  void _seedDefaults() {
+    wealth = 0;
+    dailyCost = 0;
+    days = 0;
+    fixed.clear();
+    activities.clear();
+    _transactions.clear();
+    _incomeEntries.clear();
+    presets.clear();
+    obligations.clear();
+    _counter = 0;
+    for (final title in [
+      'Dining Out',
+      'Hanging with Friends',
+      'Entertainment'
+    ]) {
+      activities.add(PersonalActivity(id: newId(), title: title));
     }
+    _seedPresets();
+  }
+
+  void _seedPresets() {
+    if (presets.isNotEmpty) return;
+    presets.addAll([
+      ExpensePreset(
+          id: newId(),
+          title: 'Coffee',
+          amount: 3,
+          category: ExpenseCategory.personal),
+      ExpensePreset(
+          id: newId(),
+          title: 'Lunch',
+          amount: 10,
+          category: ExpenseCategory.personal),
+      ExpensePreset(
+          id: newId(),
+          title: 'Metro',
+          amount: 2,
+          category: ExpenseCategory.transport),
+    ]);
   }
 
   Map<String, dynamic> toJson() => {
-    'wealth': wealth,
-    'dailyCost': dailyCost,
-    'days': days,
-    'counter': _counter,
-    'fixed': fixed.map((e) => e.toJson()).toList(),
-    'activities': activities.map((a) => a.toJson()).toList(),
-    'transactions': _transactions.map((t) => t.toJson()).toList(),
-  };
+        'schemaVersion': 2,
+        'wealth': wealth,
+        'dailyCost': dailyCost,
+        'days': days,
+        'counter': _counter,
+        'fixed': fixed.map((e) => e.toJson()).toList(),
+        'activities': activities.map((e) => e.toJson()).toList(),
+        'transactions': _transactions.map((e) => e.toJson()).toList(),
+        'incomeEntries': _incomeEntries.map((e) => e.toJson()).toList(),
+        'presets': presets.map((e) => e.toJson()).toList(),
+        'obligations': obligations.map((e) => e.toJson()).toList(),
+      };
 
-  bool _restore(Map<String, dynamic> j) {
+  bool _restore(Map<String, dynamic> json) {
     try {
-      wealth = (j['wealth'] as num?)?.toDouble() ?? 0;
-      dailyCost = (j['dailyCost'] as num?)?.toDouble() ?? 0;
-      days = ((j['days'] as num?)?.toInt() ?? 0).clamp(0, 31);
-      fixed.addAll(
-        ((j['fixed'] as List?) ?? const []).map(
-          (e) => FixedExpense.fromJson(e as Map<String, dynamic>),
-        ),
-      );
-      activities.addAll(
-        ((j['activities'] as List?) ?? const []).map(
-          (e) => PersonalActivity.fromJson(e as Map<String, dynamic>),
-        ),
-      );
-      _transactions.addAll(
-        ((j['transactions'] as List?) ?? const []).map(
-          (e) => Transaction.fromJson(e as Map<String, dynamic>),
-        ),
-      );
-
-      final maxId = [
-        ...fixed.map((e) => e.id),
-        ...activities.map((a) => a.id),
-        ..._transactions.map((t) => t.id),
-      ].map((s) => int.tryParse(s) ?? -1).fold<int>(-1, (a, b) => math.max(a, b));
-      _counter = math.max((j['counter'] as num?)?.toInt() ?? 0, maxId + 1);
+      wealth = (json['wealth'] as num?)?.toDouble() ?? 0;
+      dailyCost = (json['dailyCost'] as num?)?.toDouble() ?? 0;
+      days = ((json['days'] as num?)?.toInt() ?? 0).clamp(0, 31).toInt();
+      fixed.addAll(((json['fixed'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => FixedExpense.fromJson(Map<String, dynamic>.from(e))));
+      activities.addAll(((json['activities'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => PersonalActivity.fromJson(Map<String, dynamic>.from(e))));
+      _transactions.addAll(((json['transactions'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => Transaction.fromJson(Map<String, dynamic>.from(e))));
+      _incomeEntries.addAll(((json['incomeEntries'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => IncomeEntry.fromJson(Map<String, dynamic>.from(e))));
+      presets.addAll(((json['presets'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => ExpensePreset.fromJson(Map<String, dynamic>.from(e))));
+      obligations.addAll(((json['obligations'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((e) => LoanDebt.fromJson(Map<String, dynamic>.from(e))));
+      _counter = math
+          .max((json['counter'] as num?)?.toInt() ?? 0, _maxExistingId + 1)
+          .toInt();
       return true;
     } catch (_) {
       wealth = 0;
@@ -78,6 +134,9 @@ class BudgetProvider extends ChangeNotifier {
       fixed.clear();
       activities.clear();
       _transactions.clear();
+      _incomeEntries.clear();
+      presets.clear();
+      obligations.clear();
       _counter = 0;
       return false;
     }
@@ -89,226 +148,190 @@ class BudgetProvider extends ChangeNotifier {
     await _storage?.write(toJson());
   }
 
-  /// Save immediately (used when the app goes to background).
   Future<void> flush() => _save();
 
-  // Every mutation calls notifyListeners → schedule a debounced save.
   @override
   void notifyListeners() {
     super.notifyListeners();
     if (_storage == null) return;
     _saveTimer?.cancel();
-    _saveTimer = Timer(const Duration(milliseconds: 400), _save);
+    _saveTimer = Timer(const Duration(milliseconds: 350), _save);
   }
 
   @override
   void dispose() {
-    if (_saveTimer?.isActive ?? false) _save();
+    _saveTimer?.cancel();
+    unawaited(_save());
     super.dispose();
   }
 
-  // ── Mutations ──
   void refresh() => notifyListeners();
-
-  void setWealth(double v) {
-    wealth = v;
+  void setWealth(double value) {
+    wealth = value.clamp(0, double.infinity).toDouble();
     notifyListeners();
   }
 
-  void setDailyCost(double v) {
-    dailyCost = v;
+  void setDailyCost(double value) {
+    dailyCost = value.clamp(0, double.infinity).toDouble();
     notifyListeners();
   }
 
-  void setDays(int v) {
-    days = v;
+  void setDays(int value) {
+    days = value.clamp(0, 31).toInt();
     notifyListeners();
   }
 
-  void addFixed() {
-    fixed.add(FixedExpense(id: newId()));
+  void addFixed({bool investment = false}) {
+    fixed.add(FixedExpense(
+      id: newId(),
+      title: investment ? 'Investments' : '',
+      allocationMode:
+          investment ? AllocationMode.percentage : AllocationMode.fixedAmount,
+      percent: investment ? 10 : 0,
+      isInvestment: investment,
+    ));
     notifyListeners();
   }
 
-  void removeFixed(FixedExpense e) {
-    fixed.remove(e);
+  void removeFixed(String id) {
+    fixed.removeWhere((e) => e.id == id);
     notifyListeners();
   }
 
-  void addActivity(PersonalActivity a) {
-    activities.add(a);
+  void addActivity(PersonalActivity activity) {
+    activities.add(activity);
     notifyListeners();
   }
 
-  void removeActivity(PersonalActivity a) {
-    activities.remove(a);
+  void removeActivity(String id) {
+    activities.removeWhere((e) => e.id == id);
     notifyListeners();
   }
 
-  void addTransaction(Transaction t) {
-    _transactions.add(t);
+  void addTransaction(Transaction transaction) {
+    _transactions.add(transaction);
     notifyListeners();
   }
 
   void removeTransaction(String id) {
-    _transactions.removeWhere((t) => t.id == id);
+    _transactions.removeWhere((e) => e.id == id);
     notifyListeners();
   }
 
-  // ── Transactions (newest first) ──
-  List<Transaction> get transactions {
-    final list = [..._transactions];
-    list.sort((a, b) {
-      final c = b.date.compareTo(a.date);
-      return c != 0
-          ? c
-          : (int.tryParse(b.id) ?? 0).compareTo(int.tryParse(a.id) ?? 0);
-    });
-    return list;
+  void addIncome(IncomeEntry entry) {
+    _incomeEntries.add(entry);
+    notifyListeners();
   }
 
-  // ── Planned ──
+  void removeIncome(String id) {
+    _incomeEntries.removeWhere((e) => e.id == id);
+    notifyListeners();
+  }
+
+  void addPreset(ExpensePreset preset) {
+    presets.add(preset);
+    notifyListeners();
+  }
+
+  void updatePreset(ExpensePreset edited) {
+    final index = presets.indexWhere((e) => e.id == edited.id);
+    if (index >= 0) presets[index] = edited;
+    notifyListeners();
+  }
+
+  void removePreset(String id) {
+    presets.removeWhere((e) => e.id == id);
+    notifyListeners();
+  }
+
+  void addObligation(LoanDebt entry) {
+    obligations.add(entry);
+    notifyListeners();
+  }
+
+  void removeObligation(String id) {
+    obligations.removeWhere((e) => e.id == id);
+    notifyListeners();
+  }
+
+  void toggleObligationSettled(String id) {
+    final index = obligations.indexWhere((e) => e.id == id);
+    if (index < 0) return;
+    obligations[index].isSettled = !obligations[index].isSettled;
+    notifyListeners();
+  }
+
+  List<Transaction> get transactions =>
+      [..._transactions]..sort((a, b) => b.dateLogged.compareTo(a.dateLogged));
+  List<IncomeEntry> get incomeEntries =>
+      [..._incomeEntries]..sort((a, b) => b.dateLogged.compareTo(a.dateLogged));
+  List<LoanDebt> get sortedObligations =>
+      [...obligations]..sort((a, b) => b.dateLogged.compareTo(a.dateLogged));
+
+  double get incomeTotal =>
+      _incomeEntries.fold(0.0, (sum, e) => sum + e.amount);
+  double get settledLoansCollected => obligations
+      .where((e) => e.kind == LoanDebtKind.loanToCollect && e.isSettled)
+      .fold(0.0, (s, e) => s + e.amount);
+  double get settledDebtsPaid => obligations
+      .where((e) => e.kind == LoanDebtKind.debtToPay && e.isSettled)
+      .fold(0.0, (s, e) => s + e.amount);
+
+  /// Available resource base includes income and the cash effect of settled debt/loan entries.
+  double get totalResources =>
+      wealth + incomeTotal + settledLoansCollected - settledDebtsPaid;
+
+  double effectiveFixed(FixedExpense item) => item.effectiveAmount(
+      startingWealth: wealth, totalResources: totalResources);
+  double get fixedTotal => fixed
+      .where((e) => !e.isInvestment)
+      .fold(0.0, (sum, e) => sum + effectiveFixed(e));
+  double get investmentTotal => fixed
+      .where((e) => e.isInvestment)
+      .fold(0.0, (sum, e) => sum + effectiveFixed(e));
+  double get allFixedTotal => fixedTotal + investmentTotal;
   double get transport => dailyCost * days;
-  double get fixedTotal => fixed.fold(0.0, (s, e) => s + e.amount);
   double get personalTotal =>
-      activities.fold(0.0, (s, a) => s + a.costPerInstance * a.frequency);
-  double get plannedTotal => transport + fixedTotal + personalTotal;
-  double get plannedRemaining => wealth - plannedTotal;
+      activities.fold(0.0, (sum, a) => sum + a.plannedAmount);
+  double get plannedTotal => allFixedTotal + transport + personalTotal;
+  double get plannedRemaining => totalResources - plannedTotal;
 
-  double plannedFor(ExpenseCategory c) => switch (c) {
-    ExpenseCategory.transport => transport,
-    ExpenseCategory.fixed => fixedTotal,
-    ExpenseCategory.personal => personalTotal,
-    ExpenseCategory.other => 0,
-  };
+  double plannedFor(ExpenseCategory category) => switch (category) {
+        ExpenseCategory.transport => transport,
+        ExpenseCategory.fixed => allFixedTotal,
+        ExpenseCategory.personal => personalTotal,
+        ExpenseCategory.other => 0,
+      };
 
-  // ── Actual ──
-  double actualFor(ExpenseCategory c) => _transactions
-      .where((t) => t.category == c)
-      .fold(0.0, (s, t) => s + t.amount);
-
-  double get actualTotal => _transactions.fold(0.0, (s, t) => s + t.amount);
-
-  /// R_actual = initial wealth - total actual spent
-  double get actualRemaining => wealth - actualTotal;
-
-  // ── Variance engine ──
-  Variance varianceFor(ExpenseCategory c) =>
-      Variance(plannedFor(c), actualFor(c));
-
+  double actualFor(ExpenseCategory category) => _transactions
+      .where((e) => e.category == category)
+      .fold(0.0, (sum, e) => sum + e.amount);
+  double get actualTotal => _transactions.fold(0.0, (sum, e) => sum + e.amount);
+  double get actualRemaining => totalResources - actualTotal;
+  Variance varianceFor(ExpenseCategory category) =>
+      Variance(plannedFor(category), actualFor(category));
   Variance get totalVariance => Variance(plannedTotal, actualTotal);
 
-  // ── Net Remaining (investment basis) ──
-  /// Expenses used for investing: per category, the higher of planned or
-  /// actual. Unspent plan stays reserved; overspending reduces the margin.
-  double get projectedTotal => ExpenseCategory.values.fold(
-    0.0,
-    (s, c) => s + math.max(plannedFor(c), actualFor(c)),
-  );
+  /// Reserves each category at the higher of its plan or actual spending.
+  /// Unplanned transactions have no budget, so they reduce the surplus directly.
+  double get projectedTotal => ExpenseCategory.values.fold<double>(
+      0,
+      (sum, category) =>
+          sum + math.max(plannedFor(category), actualFor(category)).toDouble());
+  double get unplannedSurplus => totalResources - projectedTotal;
+  double get outstandingDebts => obligations
+      .where((e) => e.kind == LoanDebtKind.debtToPay && !e.isSettled)
+      .fold(0.0, (s, e) => s + e.amount);
+  double get outstandingLoans => obligations
+      .where((e) => e.kind == LoanDebtKind.loanToCollect && !e.isSettled)
+      .fold(0.0, (s, e) => s + e.amount);
 
-  /// Net Remaining = Starting Wealth - Total Expenses
-  double get netRemaining => wealth - projectedTotal;
-
-  /// 10% when margin (net / wealth) <= 10%, scaling to 20% at >= 20%.
-  double _pctFor(double w, double net) {
-    final t = (((net / w) - 0.10) / 0.10).clamp(0.0, 1.0).toDouble();
-    return 10 + 10 * t;
-  }
-
-  double _fundFor(double w, double net) =>
-      (w <= 0 || net <= 0) ? 0 : net * _pctFor(w, net) / 100;
-
-  // ── Future Goals Fund ──
-  InvestmentAdvice get advice {
-    final w = wealth;
-    final net = netRemaining;
-
-    if (w <= 0) {
-      return const InvestmentAdvice(
-        tier: AdviceTier.noWealth,
-        amount: 0,
-        percent: 0,
-        lines: ['Enter your wealth to get a Future Goals Fund recommendation.'],
-      );
-    }
-
-    if (net <= 0) {
-      final lines = <String>[
-        'Net remaining is ${money(net)}; nothing is left to allocate.',
-      ];
-
-      // Discretionary cuts that actually lower projected expenses.
-      var need = -net;
-      var reducible = math.max(
-        0.0,
-        personalTotal - actualFor(ExpenseCategory.personal),
-      );
-      final sorted =
-          activities
-              .where((a) => a.costPerInstance > 0 && a.frequency > 0)
-              .toList()
-            ..sort(
-              (a, b) => (b.costPerInstance * b.frequency).compareTo(
-                a.costPerInstance * a.frequency,
-              ),
-            );
-
-      final cuts = <String>[];
-      for (final a in sorted) {
-        if (need <= 0 || reducible <= 0) break;
-        final cut = math.min(
-          a.frequency,
-          math.min(
-            (need / a.costPerInstance).ceil(),
-            (reducible / a.costPerInstance).floor(),
-          ),
-        );
-        if (cut <= 0) continue;
-        cuts.add("Reduce '${a.title}' by $cut instance${cut == 1 ? '' : 's'}");
-        need -= cut * a.costPerInstance;
-        reducible -= cut * a.costPerInstance;
-      }
-      if (cuts.isNotEmpty) {
-        lines.add('${cuts.join('; ')} to cover the shortfall.');
-      }
-      if (need > 0) {
-        lines.add(
-          'Still ${money(need)} short after discretionary cuts — review fixed costs, transport or unplanned spending.',
-        );
-      }
-
-      return InvestmentAdvice(
-        tier: AdviceTier.deficit,
-        amount: 0,
-        percent: 0,
-        lines: lines,
-        alert: 'Reduce discretionary activities before allocating to future goals.',
-      );
-    }
-
-    final pct = _pctFor(w, net);
-    final fund = net * pct / 100;
-    final lines = <String>[
-      'Net remaining ${money(net)} = wealth − expenses (higher of planned or actual per category).',
-      'Left after funding goals: ${money(net - fund)}',
-    ];
-    if (net / w < 0.10) {
-      lines.add('Low margin: trimming discretionary spending would raise your fund.');
-    }
-
-    String? alert;
-    final plannedFund = _fundFor(w, plannedRemaining);
-    if (fund < plannedFund - 0.005) {
-      alert =
-          'Overspending reduced your Future Goals Fund from ${money(plannedFund)} to ${money(fund)}.';
-    }
-
-    return InvestmentAdvice(
-      tier: AdviceTier.goalFund,
-      amount: fund,
-      percent: pct,
-      lines: lines,
-      alert: alert,
-    );
+  Future<void> resetAll() async {
+    _saveTimer?.cancel();
+    _saveTimer = null;
+    await _storage?.clearAll();
+    _seedDefaults();
+    notifyListeners();
+    await _save();
   }
 }
